@@ -620,6 +620,10 @@ function configureMarked() {
   const used = {};
 
   renderer.code = (code, infostring) => {
+    if (code && typeof code === 'object') {
+      infostring = code.lang || '';
+      code = code.text || '';
+    }
     const raw = (infostring || '').trim().split(/\s+/)[0].toLowerCase();
     const lang = raw || 'text';
     let out;
@@ -640,6 +644,10 @@ function configureMarked() {
   };
 
   renderer.heading = (text, level) => {
+    if (text && typeof text === 'object') {
+      level = text.depth;
+      text = text.text || '';
+    }
     if (level > 3) return `<h${level}>${text}</h${level}>`;
     const base = slugify(text) || 'section';
     let slug = base, i = 1;
@@ -649,6 +657,11 @@ function configureMarked() {
   };
 
   renderer.link = (href, title, text) => {
+    if (href && typeof href === 'object') {
+      text = href.text || '';
+      title = href.title || '';
+      href = href.href || '';
+    }
     const ext = /^https?:\/\//.test(href || '');
     const t = title ? ` title="${title}"` : '';
     const rel = ext ? ' target="_blank" rel="noopener noreferrer"' : '';
@@ -657,6 +670,115 @@ function configureMarked() {
 
   marked.setOptions({ renderer, gfm: true, breaks: false, headerIds: false, mangle: false });
   _mdReady = true;
+}
+
+function inlineMarkdown(text) {
+  return escapeHtml(text)
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>');
+}
+
+function simpleMarkdown(md) {
+  const lines = md.split('\n');
+  const html = [];
+  let paragraph = [];
+  let list = [];
+  let quote = [];
+  let inCode = false;
+  let codeLang = '';
+  let code = [];
+
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    html.push(`<p>${inlineMarkdown(paragraph.join(' '))}</p>`);
+    paragraph = [];
+  };
+  const flushList = () => {
+    if (!list.length) return;
+    html.push(`<ul>${list.map(item => `<li>${inlineMarkdown(item)}</li>`).join('')}</ul>`);
+    list = [];
+  };
+  const flushQuote = () => {
+    if (!quote.length) return;
+    html.push(`<blockquote><p>${inlineMarkdown(quote.join(' '))}</p></blockquote>`);
+    quote = [];
+  };
+  const flushBlocks = () => {
+    flushParagraph();
+    flushList();
+    flushQuote();
+  };
+
+  lines.forEach(line => {
+    const fence = line.match(/^```(\w+)?\s*$/);
+    if (fence) {
+      if (inCode) {
+        const lang = codeLang || 'text';
+        html.push(`<div class="code-block" data-lang="${lang}"><div class="code-head"><span class="code-lang">${LANG_LABELS[lang] || lang.toUpperCase()}</span><button class="code-copy" type="button" aria-label="Copy code"><i class="fa-regular fa-copy"></i> Copy</button></div><pre><code>${escapeHtml(code.join('\n'))}</code></pre></div>`);
+        inCode = false;
+        codeLang = '';
+        code = [];
+      } else {
+        flushBlocks();
+        inCode = true;
+        codeLang = (fence[1] || 'text').toLowerCase();
+      }
+      return;
+    }
+    if (inCode) {
+      code.push(line);
+      return;
+    }
+    if (!line.trim()) {
+      flushBlocks();
+      return;
+    }
+    const heading = line.match(/^(#{1,3})\s+(.+)$/);
+    if (heading) {
+      flushBlocks();
+      const level = heading[1].length;
+      const text = inlineMarkdown(heading[2]);
+      const id = slugify(heading[2]) || 'section';
+      html.push(`<h${level} id="${id}"><a href="#${id}" class="anchor" aria-hidden="true">#</a>${text}</h${level}>`);
+      return;
+    }
+    const bullet = line.match(/^\s*[-*]\s+(.+)$/);
+    if (bullet) {
+      flushParagraph();
+      flushQuote();
+      list.push(bullet[1]);
+      return;
+    }
+    const blockquote = line.match(/^>\s?(.+)$/);
+    if (blockquote) {
+      flushParagraph();
+      flushList();
+      quote.push(blockquote[1]);
+      return;
+    }
+    paragraph.push(line.trim());
+  });
+
+  if (inCode) {
+    const lang = codeLang || 'text';
+    html.push(`<div class="code-block" data-lang="${lang}"><div class="code-head"><span class="code-lang">${LANG_LABELS[lang] || lang.toUpperCase()}</span><button class="code-copy" type="button" aria-label="Copy code"><i class="fa-regular fa-copy"></i> Copy</button></div><pre><code>${escapeHtml(code.join('\n'))}</code></pre></div>`);
+  }
+  flushBlocks();
+  return html.join('');
+}
+
+function renderMarkdownHtml(md) {
+  try {
+    configureMarked();
+    if (typeof marked !== 'undefined' && typeof marked.parse === 'function') {
+      return enhancePostHtml(marked.parse(md));
+    }
+  } catch (e) {
+    console.warn('Falling back to built-in markdown renderer:', e);
+  }
+  return enhancePostHtml(simpleMarkdown(md));
 }
 
 const CALLOUTS = {
@@ -805,8 +927,7 @@ async function renderMarkdownPost(slug, kind) {
 
     const fm = parseFrontMatter(md);
     const body = stripFrontMatter(md);
-    configureMarked();
-    const html = enhancePostHtml(marked.parse(body));
+    const html = renderMarkdownHtml(body);
 
     const words = body.replace(/```[\s\S]*?```/g, '').trim().split(/\s+/).filter(Boolean).length;
     const readMins = Math.max(1, Math.round(words / 200));
